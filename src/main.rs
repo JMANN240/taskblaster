@@ -8,7 +8,7 @@ use html5ever::{parse_document, serialize, ParseOpts};
 use once_cell::sync::Lazy;
 use rcdom::{RcDom, SerializableHandle};
 use regex::Regex;
-use reqwest::{header, ClientBuilder};
+use reqwest::{header, ClientBuilder, Response};
 use reqwest::{cookie::Jar, Client, Url};
 use skyscraper::html;
 use skyscraper::xpath::{self, Xpath, XpathItemTree};
@@ -26,6 +26,9 @@ static WEB2PROJECT_COOKIE: Lazy<String> = Lazy::new(|| env::var("WEB2PROJECT_COO
 
 static LIST_TASKS_TR_XPATH: Lazy<Xpath> = Lazy::new(|| xpath::parse(r#"/html/body/table/tbody/tr/td/table[4]/tbody/tr/td/table/tbody/tr[3]/td/form[2]/table/tbody/tr"#).unwrap());
 static LIST_TASKS_TASK_NAME_TD_XPATH: Lazy<Xpath> = Lazy::new(|| xpath::parse(r#"/td[7]/span/a"#).unwrap());
+
+static SHOW_TASK_TASK_NAME_STRONG_XPATH: Lazy<Xpath> = Lazy::new(|| xpath::parse(r#"/html/body/table/tbody/tr/td/table[4]/tbody/tr/td[1]/table/tbody/tr[3]/td[2]/strong"#).unwrap());
+static SHOW_TASK_TASK_DESCRIPTION_TD_XPATH: Lazy<Xpath> = Lazy::new(|| xpath::parse(r#"/html/body/table/tbody/tr/td/table[4]/tbody/tr/td[2]/table/tbody/tr[8]/td"#).unwrap());
 
 // Regex
 
@@ -62,6 +65,20 @@ enum TaskCommands {
 	}
 }
 
+// Utility ah jeez
+
+async fn get_xpath_document(response: Response) -> Result<XpathItemTree, Box<dyn std::error::Error>> {
+	let bytes = response.bytes().await?;
+	let dom = parse_document(RcDom::default(), ParseOpts::default()).from_utf8().read_from(&mut Cursor::new(bytes))?;
+	let document: SerializableHandle = dom.document.clone().into();
+	let mut buf = BufWriter::new(Vec::new());
+	serialize(&mut buf, &document, Default::default())?;
+	let buf_bytes = buf.into_inner()?;
+	let text = String::from_utf8(buf_bytes)?;
+	let html_document = html::parse(&text)?;
+	return Ok(XpathItemTree::from(&html_document));
+}
+
 // Methods
 
 async fn authenticate(client: &Client, username: &str, password: &str) -> ProcedureResult {
@@ -76,15 +93,7 @@ async fn authenticate(client: &Client, username: &str, password: &str) -> Proced
 
 async fn list_tasks(client: &Client) -> ProcedureResult {
 	let response = client.execute(client.get(format!("https://{}/index.php?m=tasks&a=todo", *WEB2PROJECT_HOST)).build()?).await?;
-	let bytes = response.bytes().await?;
-	let dom = parse_document(RcDom::default(), ParseOpts::default()).from_utf8().read_from(&mut Cursor::new(bytes))?;
-	let document: SerializableHandle = dom.document.clone().into();
-	let mut buf = BufWriter::new(Vec::new());
-	serialize(&mut buf, &document, Default::default())?;
-	let buf_bytes = buf.into_inner()?;
-	let text = String::from_utf8(buf_bytes)?;
-	let html_document = html::parse(&text)?;
-	let xpath_document = XpathItemTree::from(&html_document);
+	let xpath_document = get_xpath_document(response).await?;
 	let tr_items = LIST_TASKS_TR_XPATH.apply(&xpath_document)?;
 	for tr_item in tr_items {
 		let tr_node = tr_item.as_node()?.as_tree_node()?;
@@ -103,6 +112,13 @@ async fn list_tasks(client: &Client) -> ProcedureResult {
 }
 
 async fn show_task(client: &Client, task_id: u32) -> ProcedureResult {
+	let response = client.execute(client.get(format!("https://{}/index.php?m=tasks&a=view&task_id={}", *WEB2PROJECT_HOST, task_id)).build()?).await?;
+	let xpath_document = get_xpath_document(response).await?;
+	let task_name = SHOW_TASK_TASK_NAME_STRONG_XPATH.apply(&xpath_document)?.iter().next().unwrap().as_node()?.as_tree_node()?.text(&xpath_document).unwrap();
+	let task_description = SHOW_TASK_TASK_DESCRIPTION_TD_XPATH.apply(&xpath_document)?.iter().next().unwrap().as_node()?.as_tree_node()?.text(&xpath_document).unwrap();
+	println!("{} {}", task_id, task_name);
+	println!();
+	println!("{}", task_description);
 	return Ok(());
 }
 
